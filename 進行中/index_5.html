@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>VR昆虫採集</title>
+
+<!-- A-Frame本体の読み込み。aframe.io がブロックされる環境でも動くよう、
+     失敗したら別CDN(jsDelivr)から自動で読み込み直すフォールバックを付けています -->
+<script src="https://aframe.io/releases/1.5.0/aframe.min.js"
+    onerror="
+        console.warn('aframe.io からの読み込みに失敗。jsDelivrから再読み込みします');
+        var s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/aframe@1.5.0/dist/aframe.min.js';
+        s.onload = function(){ window.dispatchEvent(new Event('aframe-loaded')); };
+        s.onerror = function(){ alert('A-Frameの読み込みに失敗しました。ネットワーク接続、または広告ブロッカーの設定をご確認ください。'); };
+        document.head.appendChild(s);
+    "
+    onload="window.dispatchEvent(new Event('aframe-loaded'))">
+</script>
+
+<style>
+body{
+    margin:0;
+}
+#score{
+    position:absolute;
+    top:10px;
+    left:10px;
+    color:white;
+    background:rgba(0,0,0,0.5);
+    padding:10px;
+    font-size:20px;
+    z-index:999;
+    font-family: sans-serif;
+}
+#controls-info{
+    position:absolute;
+    bottom:10px;
+    left:10px;
+    color:white;
+    background:rgba(0,0,0,0.5);
+    padding:10px;
+    font-size:13px;
+    z-index:999;
+    font-family: sans-serif;
+    line-height:1.6;
+    max-width:320px;
+}
+</style>
+</head>
+
+<body>
+
+<div id="score">
+捕獲数：0
+</div>
+
+<div id="controls-info">
+【PC操作】<br>
+W/A/S/D：移動　マウス：視点操作<br>
+クリック（カーソルを虫に合わせる）：捕獲<br>
+<br>
+【Meta Quest 3S操作】<br>
+左スティック：移動　右スティック：スナップターン<br>
+トリガー（レーザーを虫に当てて引く）：捕獲
+</div>
+
+<a-scene>
+
+<a-sky color="#87CEEB"></a-sky>
+
+<a-plane
+rotation="-90 0 0"
+width="100"
+height="100"
+color="#3CB371">
+</a-plane>
+
+<!-- ① プレイヤー本体（リグ）。PCではWASDでこのリグごと移動する -->
+<a-entity id="rig" position="0 1.6 5" wasd-controls="acceleration:20; fly:false">
+
+    <!-- 視点用カメラ（マウスで視点操作） -->
+    <a-camera look-controls wasd-controls-enabled="false">
+        <a-cursor fuse="false" color="white"></a-cursor>
+
+        <!-- 虫取り網（PC用）。カメラの子要素なので視点・移動に追従する -->
+        <a-entity capture-net="mode: pc" position="0.4 -0.3 -0.4" rotation="60 -15 0"></a-entity>
+    </a-camera>
+
+    <!-- ② Meta Quest 3S用コントローラー（レーザーポインタ＋トリガーで捕獲、スティックで移動/旋回） -->
+    <a-entity
+        id="leftHand"
+        laser-controls="hand: left"
+        raycaster="objects: .bug; far: 20"
+        quest-locomotion>
+    </a-entity>
+
+    <a-entity
+        id="rightHand"
+        laser-controls="hand: right"
+        raycaster="objects: .bug; far: 20"
+        snap-turn>
+
+        <!-- 虫取り網（Quest用）。右手コントローラーの子要素なので手の動きに追従する -->
+        <a-entity capture-net="mode: vr" position="0 0 -0.05" rotation="70 0 0"></a-entity>
+    </a-entity>
+
+</a-entity>
+
+<!-- ①③ 外部モデルを使わず、コードだけで蝶々の形を生成する（読み込みエラーの心配がない） -->
+
+<a-entity
+id="bug1"
+class="bug"
+butterfly-shape="color: #ff4444"
+position="0 2 -5"
+scale="0.6 0.6 0.6">
+</a-entity>
+
+<a-entity
+id="bug2"
+class="bug"
+butterfly-shape="color: #ffd21f"
+position="4 3 -8"
+scale="0.6 0.6 0.6">
+</a-entity>
+
+<a-entity
+id="bug3"
+class="bug"
+butterfly-shape="color: #4488ff"
+position="-3 2 -10"
+scale="0.6 0.6 0.6">
+</a-entity>
+
+</a-scene>
+
+<script>
+
+// AFRAMEがまだ定義されていない場合（フォールバックCDNの読み込み待ち）は
+// 'aframe-loaded' イベントを待ってから初期化する
+function initGame(){
+
+let score = 0;
+
+const bugs = document.querySelectorAll(".bug");
+
+bugs.forEach(function(bug){
+
+    bug.addEventListener("click",function(){
+
+        // クールダウン中（逃げていない状態）以外は捕獲不可にする
+        const behavior = bug.components["bug-behavior"];
+        if(behavior && behavior.state === "fleeing"){
+            return; // 逃走中は捕まえられない
+        }
+
+        score++;
+
+        document.getElementById("score").innerHTML =
+        "捕獲数：" + score;
+
+        bug.setAttribute("visible",false);
+        bug.setAttribute("class", ""); // 二重カウント防止（レイキャスト対象から外す）
+
+    });
+
+});
+
+// 虫取り網を振るきっかけとなる入力を検知する
+// （捕獲の成否は既存のbugクリック判定がそのまま担当。ここでは"振る動作"だけを追加する）
+const sceneEl = document.querySelector("a-scene");
+
+function triggerNetSwing(mode){
+    window.dispatchEvent(new CustomEvent("net-swing", { detail: { mode: mode } }));
+}
+
+function setupPcClickSwing(){
+    if(sceneEl.canvas){
+        sceneEl.canvas.addEventListener("click", () => triggerNetSwing("pc"));
+    }
+}
+if(sceneEl.hasLoaded){
+    setupPcClickSwing();
+} else {
+    sceneEl.addEventListener("loaded", setupPcClickSwing);
+}
+
+// Quest 3S：右手コントローラーのトリガーで網を振る
+const rightHandEl = document.getElementById("rightHand");
+rightHandEl.addEventListener("triggerdown", () => triggerNetSwing("vr"));
+
+// ① プレイヤーが近づいたら逃げる。ただし逃げ続けず、
+//    一定時間逃げたらクールダウンに入り、その間は捕獲できるようにする
+// ③ 外部モデルを使わず、プリミティブ図形を組み合わせて蝶々を生成するコンポーネント
+// 虫取り網の形状生成＋「振る」アニメーションを担当するコンポーネント
+// mode: "pc"はカメラの子として視点に追従、"vr"は右手コントローラーの子として手に追従する
+AFRAME.registerComponent("capture-net", {
+
+    schema: { mode: { type: "string", default: "pc" } },
+
+    init: function(){
+
+        // 柄（持ち手）
+        const handle = document.createElement("a-cylinder");
+        handle.setAttribute("radius", 0.02);
+        handle.setAttribute("height", 0.5);
+        handle.setAttribute("color", "#8B5A2B");
+        handle.setAttribute("rotation", "90 0 0");
+        handle.setAttribute("position", "0 0 -0.25");
+        this.el.appendChild(handle);
+
+        // 輪っか（リム）
+        const rim = document.createElement("a-torus");
+        rim.setAttribute("radius", 0.18);
+        rim.setAttribute("radius-tubular", 0.012);
+        rim.setAttribute("color", "#cccccc");
+        rim.setAttribute("position", "0 0 -0.55");
+        this.el.appendChild(rim);
+
+        // 網部分（半透明のコーンで簡易的に表現）
+        const netBag = document.createElement("a-cone");
+        netBag.setAttribute("radius-bottom", 0.17);
+        netBag.setAttribute("radius-top", 0.01);
+        netBag.setAttribute("height", 0.3);
+        netBag.setAttribute("rotation", "-90 0 0"); // 開口部をリムの方向へ向ける
+        netBag.setAttribute("position", "0 0 -0.75");
+        netBag.setAttribute("material", "color: #ffffff; opacity: 0.35; wireframe: true; side: double");
+        this.el.appendChild(netBag);
+
+        // 現在の姿勢（構え）を基準として記憶しておく
+        this.restRotX = this.el.object3D.rotation.x;
+        this.state = "idle";
+        this.timer = 0;
+
+        // クリック／トリガーのイベントを受け取り、自分のmodeと一致したら振る
+        this.onSwing = (evt) => {
+            if(evt.detail.mode !== this.data.mode) return;
+            this.state = "swinging";
+            this.timer = 0;
+        };
+        window.addEventListener("net-swing", this.onSwing);
+    },
+
+    remove: function(){
+        window.removeEventListener("net-swing", this.onSwing);
+    },
+
+    tick: function(time, delta){
+
+        if(this.state !== "swinging") return;
+
+        this.timer += delta;
+        const duration = 280; // 振り切るまでの時間（ミリ秒）
+        const progress = Math.min(this.timer / duration, 1);
+
+        // 0→1→0 のカーブで前方向へサッと振って戻す
+        const swingAmount = Math.sin(progress * Math.PI) * 55; // 度
+        this.el.object3D.rotation.x =
+            this.restRotX + THREE.MathUtils.degToRad(swingAmount);
+
+        if(progress >= 1){
+            this.state = "idle";
+            this.el.object3D.rotation.x = this.restRotX;
+        }
+    }
+});
+
+AFRAME.registerComponent("butterfly-shape", {
+
+    schema: { color: { type: "color", default: "#ffffff" } },
+
+    init: function(){
+
+        const color = this.data.color;
+        this.wingPivots = [];
+
+        // 胴体（細長い円柱）
+        const body = document.createElement("a-cylinder");
+        body.setAttribute("radius", 0.015);
+        body.setAttribute("height", 0.35);
+        body.setAttribute("rotation", "90 0 0");
+        body.setAttribute("color", "#2b2b2b");
+        body.setAttribute("segments-radial", 6);
+        this.el.appendChild(body);
+
+        // 頭
+        const head = document.createElement("a-sphere");
+        head.setAttribute("radius", 0.03);
+        head.setAttribute("position", "0 0 0.19");
+        head.setAttribute("color", "#2b2b2b");
+        this.el.appendChild(head);
+
+        // 羽を1枚作るヘルパー関数
+        // side: 1=右、-1=左／ front: true=前羽（大きい）、false=後羽（小さい）
+        const makeWing = (side, front) => {
+
+            const pivot = document.createElement("a-entity");
+            pivot.setAttribute("position", `0 0.01 ${front ? 0.06 : -0.08}`);
+
+            const width  = front ? 0.5  : 0.34;
+            const height = front ? 0.4  : 0.28;
+
+            const wing = document.createElement("a-plane");
+            wing.setAttribute("width", width);
+            wing.setAttribute("height", height);
+            wing.setAttribute("color", color);
+            wing.setAttribute("side", "double");
+            wing.setAttribute("material", "shader: flat; opacity: 0.95");
+            wing.setAttribute("rotation", "-75 0 0");
+            wing.setAttribute("position", `${side * width/2} 0 0`);
+
+            pivot.appendChild(wing);
+            this.el.appendChild(pivot);
+
+            this.wingPivots.push({ el: pivot, side: side, front: front });
+        };
+
+        makeWing(1, true);
+        makeWing(-1, true);
+        makeWing(1, false);
+        makeWing(-1, false);
+
+        this.flapPhase = Math.random() * Math.PI * 2;
+    },
+
+    tick: function(time){
+
+        // 羽ばたきアニメーション（前羽と後羽で少し振幅を変えて自然に見せる）
+        this.wingPivots.forEach((wing) => {
+            const amplitude = wing.front ? 40 : 25; // 度
+            const flapDeg = Math.sin(time*0.012 + this.flapPhase) * amplitude;
+            wing.el.object3D.rotation.z = THREE.MathUtils.degToRad(flapDeg) * wing.side;
+        });
+    }
+});
+
+AFRAME.registerComponent("bug-behavior", {
+
+    schema: {
+        fleeDistance:     {type:"number", default:2.5},   // この距離まで近づくと逃げ始める
+        fleeDuration:     {type:"number", default:1200},  // 逃げる時間（ミリ秒）
+        cooldownDuration: {type:"number", default:2500},  // クールダウン時間＝捕獲チャンス（ミリ秒）
+        fleeSpeed:        {type:"number", default:3.2}    // 逃げる速さ
+    },
+
+    init: function(){
+
+        this.angle = Math.random()*360;
+        this.state = "idle"; // idle → fleeing → cooldown → idle …
+        this.stateTimer = 0;
+
+        this.playerPos = new THREE.Vector3();
+        this.tmpVec = new THREE.Vector3();
+        this.homePos = this.el.object3D.position.clone();
+
+        // ① 蝶ごとに向きをバラバラにする
+        this.el.object3D.rotation.y = Math.random() * Math.PI * 2;
+        this.el.object3D.rotation.z = (Math.random()-0.5) * 0.3; // 少しだけ傾ける
+
+        // 待機中のふらつき用に、個体ごとに揺れの速さ・タイミングをずらす
+        this.wobbleSeed = Math.random() * 100;
+        this.wobbleSpeed = 0.02 + Math.random()*0.02;
+        this.targetYaw = this.el.object3D.rotation.y;
+    },
+
+    tick: function(time, delta){
+
+        const data = this.data;
+        const obj = this.el.object3D;
+
+        // カメラ（プレイヤー）のワールド座標を取得
+        if(this.el.sceneEl.camera){
+            this.el.sceneEl.camera.getWorldPosition(this.playerPos);
+        }
+
+        const distance = obj.position.distanceTo(this.playerPos);
+
+        if(this.state === "idle"){
+
+            // 通常時はふわふわ浮遊
+            this.angle += 0.02;
+            const x = this.homePos.x + Math.sin(this.angle)*1.5;
+            const y = this.homePos.y + Math.cos(this.angle)*0.5;
+            const z = this.homePos.z + Math.cos(this.angle*0.7)*1.5;
+
+            obj.position.x += (x - obj.position.x)*0.02;
+            obj.position.y += (y - obj.position.y)*0.02;
+            obj.position.z += (z - obj.position.z)*0.02;
+
+            // ② 待機中は不規則に向きがふらふら変わる（個体ごとに揺れ方が違う）
+            this.targetYaw += (Math.random()-0.5) * 0.03;
+            obj.rotation.y += (this.targetYaw - obj.rotation.y) * this.wobbleSpeed;
+            obj.rotation.z = Math.sin(time*0.001 + this.wobbleSeed) * 0.15;
+            obj.rotation.x = Math.cos(time*0.0013 + this.wobbleSeed) * 0.08;
+
+            // プレイヤーが近づいたら逃走開始
+            if(distance < data.fleeDistance){
+                this.state = "fleeing";
+                this.stateTimer = 0;
+            }
+
+        } else if(this.state === "fleeing"){
+
+            this.stateTimer += delta;
+
+            // プレイヤーから離れる方向へ移動
+            this.tmpVec.copy(obj.position).sub(this.playerPos);
+            this.tmpVec.y = 0;
+            if(this.tmpVec.lengthSq() < 0.0001){
+                this.tmpVec.set(Math.random()-0.5, 0, Math.random()-0.5);
+            }
+            this.tmpVec.normalize();
+
+            const moveSpeed = data.fleeSpeed * (delta/1000);
+            obj.position.x += this.tmpVec.x * moveSpeed;
+            obj.position.z += this.tmpVec.z * moveSpeed;
+            obj.position.y += Math.sin(time*0.005)*0.01;
+
+            // ③ 逃げる方向を向くが、完全に一致させず少しランダムにブレさせる
+            const targetAngle = Math.atan2(this.tmpVec.x, this.tmpVec.z) + (Math.random()-0.5)*0.4;
+            obj.rotation.y += (targetAngle - obj.rotation.y) * 0.1;
+            obj.rotation.z = Math.sin(time*0.02 + this.wobbleSeed) * 0.25; // 羽ばたきの傾き
+            obj.rotation.x = Math.cos(time*0.015 + this.wobbleSeed) * 0.12;
+
+            // マップの外に出ないように制限
+            obj.position.x = THREE.MathUtils.clamp(obj.position.x, -15, 15);
+            obj.position.z = THREE.MathUtils.clamp(obj.position.z, -15, 15);
+            obj.position.y = THREE.MathUtils.clamp(obj.position.y, 0.5, 4);
+
+            // 一定時間逃げたらクールダウン（＝捕獲チャンス）へ移行
+            if(this.stateTimer > data.fleeDuration){
+                this.state = "cooldown";
+                this.stateTimer = 0;
+                this.homePos.copy(obj.position); // 逃げた先を新しい定位置にする
+            }
+
+        } else if(this.state === "cooldown"){
+
+            this.stateTimer += delta;
+
+            // クールダウン中は逃げずにゆっくり浮遊するだけ＝捕まえやすい
+            this.angle += 0.02;
+            const x = this.homePos.x + Math.sin(this.angle)*0.3;
+            const y = this.homePos.y + Math.cos(this.angle)*0.2;
+            const z = this.homePos.z + Math.cos(this.angle*0.7)*0.3;
+
+            obj.position.x += (x - obj.position.x)*0.05;
+            obj.position.y += (y - obj.position.y)*0.05;
+            obj.position.z += (z - obj.position.z)*0.05;
+
+            // ② クールダウン中も不規則にふらふら向きが変わる
+            this.targetYaw += (Math.random()-0.5) * 0.05;
+            obj.rotation.y += (this.targetYaw - obj.rotation.y) * this.wobbleSpeed;
+            obj.rotation.z = Math.sin(time*0.004 + this.wobbleSeed) * 0.2;
+            obj.rotation.x = Math.cos(time*0.005 + this.wobbleSeed) * 0.1;
+
+            // 捕まえやすさが分かるように少しパルスさせる
+            const pulse = 1 + Math.sin(time*0.01)*0.15;
+            this.el.object3D.scale.set(pulse, pulse, pulse);
+
+            if(this.stateTimer > data.cooldownDuration){
+                this.state = "idle";
+                this.stateTimer = 0;
+                this.el.object3D.scale.set(1,1,1);
+            }
+        }
+    }
+});
+
+document.querySelectorAll(".bug").forEach(function(bug){
+    bug.setAttribute("bug-behavior","");
+});
+
+
+// ② Meta Quest 3S：左スティックで移動（視点方向を基準に前後左右移動）
+AFRAME.registerComponent("quest-locomotion", {
+
+    init: function(){
+        this.moveVec = {x:0, y:0};
+        this.el.addEventListener("axismove", (evt) => {
+            const axes = evt.detail.axis;
+            // コントローラーによってThumbstickのインデックスが異なるため両対応
+            this.moveVec.x = axes[2] !== undefined ? axes[2] : axes[0];
+            this.moveVec.y = axes[3] !== undefined ? axes[3] : axes[1];
+        });
+    },
+
+    tick: function(time, delta){
+        if(Math.abs(this.moveVec.x) < 0.15 && Math.abs(this.moveVec.y) < 0.15) return;
+
+        const rig = this.el.parentEl.object3D;
+        const camera = this.el.sceneEl.camera;
+        if(!camera) return;
+
+        const dt = delta/1000;
+        const speed = 2.5;
+
+        const dir = new THREE.Vector3();
+        camera.getWorldDirection(dir);
+        dir.y = 0;
+        dir.normalize();
+
+        const right = new THREE.Vector3();
+        right.crossVectors(dir, new THREE.Vector3(0,1,0)).negate();
+
+        rig.position.addScaledVector(dir, -this.moveVec.y * speed * dt);
+        rig.position.addScaledVector(right, this.moveVec.x * speed * dt);
+    }
+});
+
+// ② Meta Quest 3S：右スティックでスナップターン（酔い防止のため段階的に回転）
+AFRAME.registerComponent("snap-turn", {
+
+    init: function(){
+        this.ready = true;
+        this.el.addEventListener("axismove", (evt) => {
+            const axes = evt.detail.axis;
+            const x = axes[2] !== undefined ? axes[2] : axes[0];
+
+            if(Math.abs(x) > 0.7 && this.ready){
+                const rig = this.el.parentEl.object3D;
+                rig.rotation.y += (x > 0 ? -1 : 1) * (Math.PI/6); // 30度スナップターン
+                this.ready = false;
+                setTimeout(() => { this.ready = true; }, 350);
+            } else if(Math.abs(x) < 0.3){
+                this.ready = true;
+            }
+        });
+    }
+});
+
+} // ← initGame() の終わり
+
+// AFRAMEが既に読み込み済みならすぐ実行、まだなら読み込み完了を待つ
+if(typeof AFRAME !== "undefined"){
+    initGame();
+} else {
+    window.addEventListener("aframe-loaded", initGame);
+}
+
+</script>
+
+</body>
+</html>
